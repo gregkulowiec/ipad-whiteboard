@@ -19,10 +19,7 @@ import {
   Pointer,
   ChevronLeft,
   ChevronRight,
-  Plus,
-  ZoomIn,
-  ZoomOut,
-  RotateUp
+  Plus
 } from 'lucide-react';
 import Peer from 'peerjs';
 import { QRCodeSVG } from 'qrcode.react';
@@ -73,7 +70,7 @@ export default function App() {
   const connRef = useRef(null);
   const currentPathRef = useRef(null);
   const isDrawingRef = useRef(false);
-  const laserPathsRef = useRef([]); // Stores temporary laser paths with timestamps
+  const laserPathsRef = useRef([]); // Temporary laser paths
   const pinchStartRef = useRef(null);
 
   // Read URL parameters on mount
@@ -124,7 +121,6 @@ export default function App() {
     ctx.restore();
 
     ctx.save();
-    // Apply Zoom & Pan Transformations
     ctx.translate(pan.x, pan.y);
     ctx.scale(scale, scale);
 
@@ -200,11 +196,11 @@ export default function App() {
       ctx.restore();
     };
 
-    // Render Current Page Paths
+    // Render Current Page Permanent Paths
     const activePagePaths = pages[currentPage] || [];
     activePagePaths.forEach(renderPath);
 
-    // Render Active Drawing Path
+    // Render Active In-Progress Path
     if (currentPathRef.current) {
       renderPath(currentPathRef.current);
     }
@@ -242,7 +238,7 @@ export default function App() {
     return () => window.removeEventListener('resize', resizeCanvas);
   }, [role, redrawCanvas]);
 
-  // PeerJS Signaling Connection
+  // PeerJS Connection Setup
   useEffect(() => {
     if (!role || !roomId) return;
 
@@ -324,9 +320,11 @@ export default function App() {
         if (currentPathRef.current.tool === 'laser') {
           laserPathsRef.current.push({ ...currentPathRef.current, timestamp: Date.now() });
         } else {
+          const completedPath = { ...currentPathRef.current };
           setPages((prevPages) => {
             const newPages = [...prevPages];
-            newPages[data.pageIndex] = [...(newPages[data.pageIndex] || []), currentPathRef.current];
+            const targetIdx = data.pageIndex !== undefined ? data.pageIndex : currentPage;
+            newPages[targetIdx] = [...(newPages[targetIdx] || []), completedPath];
             return newPages;
           });
         }
@@ -358,7 +356,7 @@ export default function App() {
     }
   };
 
-  // Precise Touch Mapping with Zoom & Pan Calculation
+  // Coordinates Mapping
   const getCanvasCoordinates = (e) => {
     const canvas = canvasRef.current;
     if (!canvas) return { x: 0, y: 0 };
@@ -367,7 +365,6 @@ export default function App() {
     const rawX = e.clientX - rect.left;
     const rawY = e.clientY - rect.top;
 
-    // Apply Inverse Zoom/Pan
     const transformedX = (rawX - pan.x) / scale;
     const transformedY = (rawY - pan.y) / scale;
 
@@ -377,7 +374,7 @@ export default function App() {
     return { x: normX, y: normY };
   };
 
-  // Pinch-to-Zoom Gesture Handlers
+  // Pinch Zoom Gesture
   const handleTouchStart = (e) => {
     if (e.touches.length === 2) {
       isDrawingRef.current = false;
@@ -404,7 +401,7 @@ export default function App() {
     pinchStartRef.current = null;
   };
 
-  // Pointer Event Handlers
+  // Pointer Handlers
   const handlePointerDown = (e) => {
     if (role !== 'host') return;
     if (e.cancelable) e.preventDefault();
@@ -470,12 +467,15 @@ export default function App() {
     }
 
     if (currentPathRef.current) {
-      if (tool === 'laser') {
-        laserPathsRef.current.push({ ...currentPathRef.current, timestamp: Date.now() });
+      const finishedPath = { ...currentPathRef.current };
+
+      if (finishedPath.tool === 'laser') {
+        laserPathsRef.current.push({ ...finishedPath, timestamp: Date.now() });
       } else {
+        // Save permanently to the host page state
         setPages((prevPages) => {
           const newPages = [...prevPages];
-          newPages[currentPage] = [...(newPages[currentPage] || []), currentPathRef.current];
+          newPages[currentPage] = [...(newPages[currentPage] || []), finishedPath];
           return newPages;
         });
       }
@@ -486,7 +486,7 @@ export default function App() {
     }
   };
 
-  // Canvas Actions
+  // Actions
   const handleClear = () => {
     setPages((prev) => {
       const copy = [...prev];
@@ -507,7 +507,6 @@ export default function App() {
     broadcastData({ type: 'UNDO', pageIndex: currentPage });
   };
 
-  // Pagination Actions
   const handlePageChange = (newIdx) => {
     if (newIdx >= 0 && newIdx < pages.length) {
       setCurrentPage(newIdx);
@@ -530,22 +529,17 @@ export default function App() {
     broadcastData({ type: 'PAGE_DELETE', deleteIndex: currentPage, newPageIndex: newIdx });
   };
 
-  // Export Canvas to PNG
   const handleExportPNG = () => {
     const canvas = canvasRef.current;
     if (!canvas) return;
 
-    // Create temporary off-screen canvas to render with dark background
     const exportCanvas = document.createElement('canvas');
     exportCanvas.width = canvas.width;
     exportCanvas.height = canvas.height;
     const ctx = exportCanvas.getContext('2d');
 
-    // Fill dark theme background
     ctx.fillStyle = '#0f172a';
     ctx.fillRect(0, 0, exportCanvas.width, exportCanvas.height);
-
-    // Draw active whiteboard contents
     ctx.drawImage(canvas, 0, 0);
 
     const link = document.createElement('a');
@@ -554,7 +548,6 @@ export default function App() {
     link.click();
   };
 
-  // Landing Screen
   if (!role) {
     return (
       <div className="min-h-screen bg-[#07090e] text-slate-100 flex flex-col items-center justify-center p-6 selection:bg-blue-500/30">
@@ -735,7 +728,7 @@ export default function App() {
         </div>
       </header>
 
-      {/* Main Drawing Surface */}
+      {/* Main Surface */}
       <main className="flex-1 relative flex items-center justify-center p-2 sm:p-6 bg-[#07090e]">
         <div className="absolute inset-0 bg-[radial-gradient(#1e293b_1px,transparent_1px)] [background-size:24px_24px] opacity-40 pointer-events-none" />
 
@@ -752,7 +745,6 @@ export default function App() {
             className="w-full h-full cursor-crosshair touch-none select-none"
           />
 
-          {/* Display Mode Waiting Overlay */}
           {role === 'display' && peerStatus !== 'connected' && (
             <div className="absolute inset-0 bg-slate-950/95 backdrop-blur-2xl flex flex-col items-center justify-center space-y-6 z-10 p-6 text-center">
               <div className="space-y-2 max-w-sm">
@@ -775,10 +767,9 @@ export default function App() {
         </div>
       </main>
 
-      {/* Controller Floating Bar (Host Role Only) */}
+      {/* Floating Toolbar (Host Only) */}
       {role === 'host' && (
         <footer className="fixed bottom-6 left-1/2 -translate-x-1/2 z-30 flex items-center space-x-3 bg-slate-900/80 backdrop-blur-2xl border border-slate-800/80 p-2 rounded-2xl shadow-2xl max-w-[95vw] overflow-x-auto">
-          {/* Main Drawing & Shape Tool Switcher */}
           <div className="flex items-center bg-slate-950/80 p-1 rounded-xl border border-slate-800/80 space-x-1">
             <button
               onClick={() => setTool('pen')}
@@ -839,7 +830,6 @@ export default function App() {
             </button>
           </div>
 
-          {/* Pen Color Palette */}
           {['pen', 'rectangle', 'circle', 'line'].includes(tool) && (
             <div className="flex items-center space-x-1.5 bg-slate-950/80 p-1.5 rounded-xl border border-slate-800/80">
               {COLOR_PALETTE.map((c) => (
@@ -857,7 +847,6 @@ export default function App() {
 
           <div className="h-5 w-px bg-slate-800" />
 
-          {/* Palm Guard, Zoom, Undo & Clear */}
           <div className="flex items-center space-x-1.5">
             <button
               onClick={() => setPalmRejection(!palmRejection)}
