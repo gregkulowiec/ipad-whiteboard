@@ -1,24 +1,20 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { 
   Pencil, 
   Eraser, 
   RotateCcw, 
   Trash2, 
-  QrCode, 
   Wifi, 
   WifiOff, 
-  Maximize2, 
   Monitor, 
   Tablet, 
   ShieldAlert, 
   ShieldCheck,
-  Download,
-  Share2
+  RefreshCw
 } from 'lucide-react';
 import Peer from 'peerjs';
 import { QRCodeSVG } from 'qrcode.react';
 
-// STUN servers configuration for reliable WebRTC connection across firewalls/routers
 const PEER_CONFIG = {
   config: {
     iceServers: [
@@ -38,28 +34,27 @@ export default function App() {
   
   // Canvas & Drawing Tools State
   const [tool, setTool] = useState('pen'); // 'pen' | 'eraser'
-  const [color, setColor] = useState('#2563eb'); // Default blue
+  const [color, setColor] = useState('#2563eb');
   const [baseWidth, setBaseWidth] = useState(4);
-  const [palmRejection, setPalmRejection] = useState(true);
+  const [palmRejection, setPalmRejection] = useState(false); // Default false so touch works out-of-the-box
   
   // Refs
   const canvasRef = useRef(null);
   const peerRef = useRef(null);
   const connRef = useRef(null);
-  const pathsRef = useRef([]); // Stores array of paths for rendering & undo
+  const pathsRef = useRef([]);
   const currentPathRef = useRef(null);
   const isDrawingRef = useRef(false);
 
-  // Read URL parameters on mount to auto-assign role or room ID
+  // Read URL parameters on mount
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
     const urlRole = params.get('role');
     const urlRoom = params.get('room');
 
     if (urlRoom) {
-      setRoomId(urlRoom);
+      setRoomId(urlRoom.toUpperCase());
     } else {
-      // Generate random 6-character room code if none provided
       const newRoomId = Math.random().toString(36).substring(2, 8).toUpperCase();
       setRoomId(newRoomId);
     }
@@ -69,7 +64,68 @@ export default function App() {
     }
   }, []);
 
-  // Initialize Canvas Aspect Ratio (16:9)
+  // Redraw Canvas Handler with global composite eraser fix
+  const redrawCanvas = useCallback(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const ctx = canvas.getContext('2d');
+    
+    const rect = canvas.getBoundingClientRect();
+    const width = rect.width;
+    const height = rect.height;
+
+    // Reset transform matrix before clear to handle retina scaling cleanups
+    ctx.save();
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    ctx.restore();
+
+    const renderPath = (path) => {
+      if (!path || !path.points || path.points.length === 0) return;
+
+      ctx.save();
+      ctx.beginPath();
+      ctx.lineCap = 'round';
+      ctx.lineJoin = 'round';
+
+      if (path.tool === 'eraser') {
+        ctx.globalCompositeOperation = 'destination-out';
+        ctx.strokeStyle = 'rgba(0,0,0,1)';
+      } else {
+        ctx.globalCompositeOperation = 'source-over';
+        ctx.strokeStyle = path.color;
+      }
+
+      for (let i = 0; i < path.points.length; i++) {
+        const pt = path.points[i];
+        const x = pt.x * width;
+        const y = pt.y * height;
+        const lineWidth = pt.pressure ? path.width * (0.3 + pt.pressure * 1.4) : path.width;
+
+        ctx.lineWidth = lineWidth;
+
+        if (i === 0) {
+          ctx.moveTo(x, y);
+        } else {
+          const prevPt = path.points[i - 1];
+          const prevX = prevPt.x * width;
+          const prevY = prevPt.y * height;
+          const midX = (prevX + x) / 2;
+          const midY = (prevY + y) / 2;
+          ctx.quadraticCurveTo(prevX, prevY, midX, midY);
+        }
+      }
+      ctx.stroke();
+      ctx.restore();
+    };
+
+    pathsRef.current.forEach(renderPath);
+    if (currentPathRef.current) {
+      renderPath(currentPathRef.current);
+    }
+  }, []);
+
+  // Handle Resize & High-DPI (Retina) Canvas Scaling
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
@@ -80,9 +136,8 @@ export default function App() {
       
       const width = container.clientWidth;
       const height = container.clientHeight;
-      
-      // Set high-DPI scaling
       const dpr = window.devicePixelRatio || 1;
+      
       canvas.width = width * dpr;
       canvas.height = height * dpr;
       
@@ -95,16 +150,15 @@ export default function App() {
     resizeCanvas();
     window.addEventListener('resize', resizeCanvas);
     return () => window.removeEventListener('resize', resizeCanvas);
-  }, [role]);
+  }, [role, redrawCanvas]);
 
-  // PeerJS Connection Setup
+  // PeerJS Signaling Connection & Handshake logic
   useEffect(() => {
     if (!role || !roomId) return;
 
     setPeerStatus('connecting');
 
     if (role === 'display') {
-      // Display Mode: Acts as the WebRTC Host Server using roomId as Peer ID
       const peer = new Peer(`wb-${roomId}`, PEER_CONFIG);
       peerRef.current = peer;
 
@@ -116,10 +170,7 @@ export default function App() {
         connRef.current = conn;
         setPeerStatus('connected');
 
-        conn.on('data', (data) => {
-          handleIncomingData(data);
-        });
-
+        conn.on('data', (data) => handleIncomingData(data));
         conn.on('close', () => setPeerStatus('disconnected'));
         conn.on('error', () => setPeerStatus('disconnected'));
       });
@@ -130,24 +181,11 @@ export default function App() {
       });
 
     } else if (role === 'host') {
-      // Host (iPad) Mode: Connects to the Display Peer ID
       const peer = new Peer(PEER_CONFIG);
       peerRef.current = peer;
 
       peer.on('open', () => {
-        const conn = peer.connect(`wb-${roomId}`, { reliable: true });
-        connRef.current = conn;
-
-        conn.on('open', () => {
-          setPeerStatus('connected');
-        });
-
-        conn.on('data', (data) => {
-          handleIncomingData(data);
-        });
-
-        conn.on('close', () => setPeerStatus('disconnected'));
-        conn.on('error', () => setPeerStatus('disconnected'));
+        connectToDisplay(peer, roomId);
       });
 
       peer.on('error', (err) => {
@@ -162,7 +200,27 @@ export default function App() {
     };
   }, [role, roomId]);
 
-  // Handle peer network events
+  // Connect to Display Peer with retry loop for host
+  const connectToDisplay = (peer, roomCode, retryCount = 0) => {
+    setPeerStatus('connecting');
+    const conn = peer.connect(`wb-${roomCode}`, { reliable: true });
+    connRef.current = conn;
+
+    conn.on('open', () => {
+      setPeerStatus('connected');
+    });
+
+    conn.on('data', (data) => handleIncomingData(data));
+    conn.on('close', () => setPeerStatus('disconnected'));
+    
+    conn.on('error', () => {
+      setPeerStatus('disconnected');
+      if (retryCount < 5) {
+        setTimeout(() => connectToDisplay(peer, roomCode, retryCount + 1), 1500);
+      }
+    });
+  };
+
   const broadcastData = (data) => {
     if (connRef.current && connRef.current.open) {
       connRef.current.send(data);
@@ -193,116 +251,61 @@ export default function App() {
     }
   };
 
-  // Canvas Drawing & Rendering Logic
-  const redrawCanvas = () => {
-    const canvas = canvasRef.current;
-    if (!canvas) return;
-    const ctx = canvas.getContext('2d');
-    
-    // Clear display
-    ctx.clearRect(0, 0, canvas.width, canvas.height);
-
-    const rect = canvas.getBoundingClientRect();
-    const width = rect.width;
-    const height = rect.height;
-
-    const renderPath = (path) => {
-      if (!path || !path.points || path.points.length === 0) return;
-
-      ctx.beginPath();
-      ctx.lineCap = 'round';
-      ctx.lineJoin = 'round';
-      ctx.strokeStyle = path.tool === 'eraser' ? '#0f172a' : path.color;
-
-      for (let i = 0; i < path.points.length; i++) {
-        const pt = path.points[i];
-        // Convert normalized coordinates (0.0 to 1.0) back to local pixels
-        const x = pt.x * width;
-        const y = pt.y * height;
-        const lineWidth = pt.pressure ? path.width * (0.2 + pt.pressure * 1.5) : path.width;
-
-        ctx.lineWidth = lineWidth;
-
-        if (i === 0) {
-          ctx.moveTo(x, y);
-        } else {
-          const prevPt = path.points[i - 1];
-          const prevX = prevPt.x * width;
-          const prevY = prevPt.y * height;
-          // Smooth quadratic curve interpolation
-          const midX = (prevX + x) / 2;
-          const midY = (prevY + y) / 2;
-          ctx.quadraticCurveTo(prevX, prevY, midX, midY);
-        }
-      }
-      ctx.stroke();
-    };
-
-    // Render saved paths
-    pathsRef.current.forEach(renderPath);
-
-    // Render active path
-    if (currentPathRef.current) {
-      renderPath(currentPathRef.current);
-    }
-  };
-
-  // Pointer Events (Apple Pencil & Touch Input)
+  // Pointer Events (Touch, Apple Pencil, Mouse Handling)
   const handlePointerDown = (e) => {
     if (role !== 'host') return;
-    
-    // Apple Pencil Palm Rejection check
-    if (palmRejection && e.pointerType === 'touch') {
-      return; 
-    }
+    if (e.cancelable) e.preventDefault();
+
+    // Palm Rejection logic: when enabled, ignore single finger touches if Apple Pencil is active
+    if (palmRejection && e.pointerType === 'touch') return;
 
     isDrawingRef.current = true;
     const canvas = canvasRef.current;
-    const rect = canvas.getBoundingClientRect();
+    if (!canvas) return;
 
-    // Normalize coordinates to 0.0 - 1.0 range based on 16:9 box
+    try {
+      canvas.setPointerCapture(e.pointerId);
+    } catch (err) {
+      // Fallback for custom webviews
+    }
+
+    const rect = canvas.getBoundingClientRect();
     const normX = (e.clientX - rect.left) / rect.width;
     const normY = (e.clientY - rect.top) / rect.height;
-    const pressure = e.pressure && e.pressure > 0 ? e.pressure : 0.5;
+    
+    const pressure = e.pointerType === 'pen' && e.pressure > 0 ? e.pressure : 0.5;
 
     const newPath = {
       id: Date.now(),
       tool,
       color,
-      width: tool === 'eraser' ? baseWidth * 4 : baseWidth,
+      width: tool === 'eraser' ? baseWidth * 5 : baseWidth,
       points: [{ x: normX, y: normY, pressure }]
     };
 
     currentPathRef.current = newPath;
     redrawCanvas();
-
-    broadcastData({
-      type: 'DRAW_START',
-      path: newPath
-    });
+    broadcastData({ type: 'DRAW_START', path: newPath });
   };
 
   const handlePointerMove = (e) => {
     if (!isDrawingRef.current || role !== 'host') return;
-    if (palmRejection && e.pointerType === 'touch') return;
+    if (e.cancelable) e.preventDefault();
 
     const canvas = canvasRef.current;
+    if (!canvas) return;
     const rect = canvas.getBoundingClientRect();
 
     const normX = (e.clientX - rect.left) / rect.width;
     const normY = (e.clientY - rect.top) / rect.height;
-    const pressure = e.pressure && e.pressure > 0 ? e.pressure : 0.5;
+    const pressure = e.pointerType === 'pen' && e.pressure > 0 ? e.pressure : 0.5;
 
     const point = { x: normX, y: normY, pressure };
 
     if (currentPathRef.current) {
       currentPathRef.current.points.push(point);
       redrawCanvas();
-
-      broadcastData({
-        type: 'DRAW_MOVE',
-        point
-      });
+      broadcastData({ type: 'DRAW_MOVE', point });
     }
   };
 
@@ -310,11 +313,19 @@ export default function App() {
     if (!isDrawingRef.current || role !== 'host') return;
     isDrawingRef.current = false;
 
+    const canvas = canvasRef.current;
+    if (canvas) {
+      try {
+        canvas.releasePointerCapture(e.pointerId);
+      } catch (err) {
+        // Ignore capture release errors
+      }
+    }
+
     if (currentPathRef.current) {
       pathsRef.current.push(currentPathRef.current);
       currentPathRef.current = null;
       redrawCanvas();
-
       broadcastData({ type: 'DRAW_END' });
     }
   };
@@ -332,17 +343,17 @@ export default function App() {
     broadcastData({ type: 'UNDO' });
   };
 
-  // Role Selection Landing Screen
+  // Role Selection Screen
   if (!role) {
     return (
-      <div className="min-h-screen bg-slate-950 text-white flex flex-col items-center justify-center p-6">
+      <div className="min-h-screen bg-slate-950 text-white flex flex-col items-center justify-center p-6 select-none">
         <div className="max-w-md w-full bg-slate-900 border border-slate-800 rounded-2xl p-8 shadow-2xl space-y-6">
           <div className="text-center space-y-2">
             <h1 className="text-3xl font-bold bg-gradient-to-r from-blue-400 to-indigo-400 bg-clip-text text-transparent">
-              Real-time Whiteboard
+              iPad Whiteboard
             </h1>
             <p className="text-slate-400 text-sm">
-              Ink on your iPad and stream directly to your Desktop/Projector with zero latency.
+              Stream live drawing from your iPad or iPhone to a desktop display in real time.
             </p>
           </div>
 
@@ -406,7 +417,7 @@ export default function App() {
 
   return (
     <div className="min-h-screen bg-slate-950 text-white flex flex-col justify-between select-none overflow-hidden touch-none">
-      {/* Top Header Bar */}
+      {/* Header Bar */}
       <header className="flex items-center justify-between px-6 py-3 border-b border-slate-800/80 bg-slate-900/50 backdrop-blur z-20">
         <div className="flex items-center space-x-4">
           <div className="flex items-center space-x-2">
@@ -424,7 +435,7 @@ export default function App() {
           </div>
         </div>
 
-        {/* Network Status Badge */}
+        {/* Peer Network Connection Status */}
         <div className="flex items-center space-x-3">
           <div className={`flex items-center space-x-2 text-xs px-3 py-1.5 rounded-full border ${
             peerStatus === 'connected' 
@@ -446,16 +457,25 @@ export default function App() {
             ) : (
               <>
                 <WifiOff className="w-3.5 h-3.5" />
-                <span>Waiting for peer...</span>
+                <span>Disconnected</span>
               </>
             )}
           </div>
+
+          {role === 'host' && peerStatus === 'disconnected' && (
+            <button 
+              onClick={() => peerRef.current && connectToDisplay(peerRef.current, roomId)}
+              className="p-1.5 text-xs bg-slate-800 hover:bg-slate-700 rounded-lg border border-slate-700 text-slate-300 transition"
+              title="Retry Connection"
+            >
+              <RefreshCw className="w-3.5 h-3.5" />
+            </button>
+          )}
         </div>
       </header>
 
-      {/* Main Canvas Area */}
+      {/* Main Canvas Viewport */}
       <main className="flex-1 relative flex items-center justify-center p-4 bg-slate-950">
-        {/* 16:9 Aspect Ratio Container */}
         <div className="relative w-full max-w-[1920px] aspect-video bg-slate-900 rounded-2xl border border-slate-800 shadow-2xl overflow-hidden flex items-center justify-center">
           <canvas
             ref={canvasRef}
@@ -463,16 +483,15 @@ export default function App() {
             onPointerMove={handlePointerMove}
             onPointerUp={handlePointerUp}
             onPointerLeave={handlePointerUp}
-            className="w-full h-full cursor-crosshair touch-none"
+            className="w-full h-full cursor-crosshair touch-none select-none"
           />
 
-          {/* QR Code Overlay for Display View when not connected */}
           {role === 'display' && peerStatus !== 'connected' && (
             <div className="absolute inset-0 bg-slate-950/90 backdrop-blur-md flex flex-col items-center justify-center space-y-6 z-10 p-6 text-center">
               <div className="space-y-2">
                 <h2 className="text-2xl font-bold">Scan to Connect iPad</h2>
                 <p className="text-slate-400 text-sm max-w-sm">
-                  Point your iPad camera at this QR code to automatically open the drawing input controls.
+                  Point your iPad or iPhone camera at this QR code to start drawing instantly.
                 </p>
               </div>
 
@@ -489,10 +508,9 @@ export default function App() {
         </div>
       </main>
 
-      {/* iPad Drawing Controls Bar (Host Role Only) */}
+      {/* iPad Drawing Controls (Host Role Only) */}
       {role === 'host' && (
         <footer className="px-6 py-4 border-t border-slate-800/80 bg-slate-900/80 backdrop-blur z-20 flex items-center justify-between">
-          {/* Tools & Colors */}
           <div className="flex items-center space-x-4">
             <div className="flex items-center bg-slate-950 p-1 rounded-xl border border-slate-800">
               <button
@@ -515,7 +533,6 @@ export default function App() {
               </button>
             </div>
 
-            {/* Pen Palette */}
             {tool === 'pen' && (
               <div className="flex items-center space-x-2 bg-slate-950 p-1.5 rounded-xl border border-slate-800">
                 {['#2563eb', '#ef4444', '#10b981', '#f59e0b', '#ffffff'].map((c) => (
@@ -532,7 +549,6 @@ export default function App() {
             )}
           </div>
 
-          {/* Action Buttons & Palm Rejection Toggle */}
           <div className="flex items-center space-x-3">
             <button
               onClick={() => setPalmRejection(!palmRejection)}
