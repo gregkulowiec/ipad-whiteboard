@@ -70,7 +70,7 @@ export default function App() {
   const connRef = useRef(null);
   const currentPathRef = useRef(null);
   const isDrawingRef = useRef(false);
-  const laserPathsRef = useRef([]); // Temporary laser paths
+  const laserPathsRef = useRef([]); // Temporary fading laser paths
   const pinchStartRef = useRef(null);
 
   // Read URL parameters on mount
@@ -91,7 +91,7 @@ export default function App() {
     }
   }, []);
 
-  // Laser Fade-out Animation Loop
+  // Laser Fade-out Animation Loop (Only purges laser paths, never regular strokes)
   useEffect(() => {
     const interval = setInterval(() => {
       const now = Date.now();
@@ -121,6 +121,7 @@ export default function App() {
     ctx.restore();
 
     ctx.save();
+    // Apply Zoom & Pan Transformations
     ctx.translate(pan.x, pan.y);
     ctx.scale(scale, scale);
 
@@ -141,7 +142,7 @@ export default function App() {
         const opacity = Math.max(0, 1 - age / 2000);
         ctx.strokeStyle = `rgba(239, 68, 68, ${opacity})`;
         ctx.shadowColor = '#ef4444';
-        ctx.shadowBlur = 10;
+        ctx.shadowBlur = 12;
       } else {
         ctx.globalCompositeOperation = 'source-over';
         ctx.strokeStyle = path.color;
@@ -172,13 +173,13 @@ export default function App() {
           ctx.stroke();
         }
       } else {
-        // Freehand Pen / Eraser / Laser
+        // Freehand Pen / Eraser / Laser Pointer
         for (let i = 0; i < path.points.length; i++) {
           const pt = path.points[i];
           const x = pt.x * width;
           const y = pt.y * height;
           const lineWidth = pt.pressure ? path.width * (0.3 + pt.pressure * 1.5) : path.width;
-          ctx.lineWidth = lineWidth;
+          ctx.lineWidth = path.tool === 'laser' ? baseWidth * 2.5 : lineWidth;
 
           if (i === 0) {
             ctx.moveTo(x, y);
@@ -196,20 +197,20 @@ export default function App() {
       ctx.restore();
     };
 
-    // Render Current Page Permanent Paths
+    // 1. Render Permanent Page Paths
     const activePagePaths = pages[currentPage] || [];
     activePagePaths.forEach(renderPath);
 
-    // Render Active In-Progress Path
+    // 2. Render In-Progress Active Path
     if (currentPathRef.current) {
       renderPath(currentPathRef.current);
     }
 
-    // Render Fading Laser Pointer Paths
+    // 3. Render Fading Laser Pointer Paths
     laserPathsRef.current.forEach(renderPath);
 
     ctx.restore();
-  }, [pages, currentPage, scale, pan]);
+  }, [pages, currentPage, scale, pan, baseWidth]);
 
   // Handle Resize & DPI Scaling
   useEffect(() => {
@@ -238,7 +239,7 @@ export default function App() {
     return () => window.removeEventListener('resize', resizeCanvas);
   }, [role, redrawCanvas]);
 
-  // PeerJS Connection Setup
+  // PeerJS Signaling Connection
   useEffect(() => {
     if (!role || !roomId) return;
 
@@ -356,7 +357,7 @@ export default function App() {
     }
   };
 
-  // Coordinates Mapping
+  // Fixed Coordinate Mapping Accounting for Dynamic Scale & Pan Matrix
   const getCanvasCoordinates = (e) => {
     const canvas = canvasRef.current;
     if (!canvas) return { x: 0, y: 0 };
@@ -365,6 +366,7 @@ export default function App() {
     const rawX = e.clientX - rect.left;
     const rawY = e.clientY - rect.top;
 
+    // Apply Inverse Zoom & Pan Transformation to mapped screen touch points
     const transformedX = (rawX - pan.x) / scale;
     const transformedY = (rawY - pan.y) / scale;
 
@@ -374,7 +376,7 @@ export default function App() {
     return { x: normX, y: normY };
   };
 
-  // Pinch Zoom Gesture
+  // Pinch Zoom Gesture Handlers
   const handleTouchStart = (e) => {
     if (e.touches.length === 2) {
       isDrawingRef.current = false;
@@ -472,7 +474,7 @@ export default function App() {
       if (finishedPath.tool === 'laser') {
         laserPathsRef.current.push({ ...finishedPath, timestamp: Date.now() });
       } else {
-        // Save permanently to the host page state
+        // Save permanently to active page array
         setPages((prevPages) => {
           const newPages = [...prevPages];
           newPages[currentPage] = [...(newPages[currentPage] || []), finishedPath];
