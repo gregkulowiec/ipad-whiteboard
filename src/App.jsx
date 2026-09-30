@@ -57,12 +57,8 @@ export default function App() {
   const [palmRejection, setPalmRejection] = useState(false);
 
   // Multi-Page State
-  const [pages, setPages] = useState([[]]); // Array of path arrays
+  const [pages, setPages] = useState([[]]);
   const [currentPage, setCurrentPage] = useState(0);
-
-  // Zoom & Pan State
-  const [scale, setScale] = useState(1);
-  const [pan, setPan] = useState({ x: 0, y: 0 });
 
   // Refs
   const canvasRef = useRef(null);
@@ -70,8 +66,7 @@ export default function App() {
   const connRef = useRef(null);
   const currentPathRef = useRef(null);
   const isDrawingRef = useRef(false);
-  const laserPathsRef = useRef([]); // Temporary fading laser paths
-  const pinchStartRef = useRef(null);
+  const laserPathsRef = useRef([]);
 
   // Read URL parameters on mount
   useEffect(() => {
@@ -91,7 +86,7 @@ export default function App() {
     }
   }, []);
 
-  // Laser Fade-out Animation Loop (Only purges laser paths, never regular strokes)
+  // Laser Fade-out Animation Loop
   useEffect(() => {
     const interval = setInterval(() => {
       const now = Date.now();
@@ -119,11 +114,6 @@ export default function App() {
     ctx.setTransform(1, 0, 0, 1, 0, 0);
     ctx.clearRect(0, 0, canvas.width, canvas.height);
     ctx.restore();
-
-    ctx.save();
-    // Apply Zoom & Pan Transformations
-    ctx.translate(pan.x, pan.y);
-    ctx.scale(scale, scale);
 
     const renderPath = (path) => {
       if (!path || !path.points || path.points.length === 0) return;
@@ -201,16 +191,14 @@ export default function App() {
     const activePagePaths = pages[currentPage] || [];
     activePagePaths.forEach(renderPath);
 
-    // 2. Render In-Progress Active Path
+    // 2. Render Active In-Progress Path
     if (currentPathRef.current) {
       renderPath(currentPathRef.current);
     }
 
     // 3. Render Fading Laser Pointer Paths
     laserPathsRef.current.forEach(renderPath);
-
-    ctx.restore();
-  }, [pages, currentPage, scale, pan, baseWidth]);
+  }, [pages, currentPage, baseWidth]);
 
   // Handle Resize & DPI Scaling
   useEffect(() => {
@@ -357,56 +345,24 @@ export default function App() {
     }
   };
 
-  // Fixed Coordinate Mapping Accounting for Dynamic Scale & Pan Matrix
+  // Direct 1:1 Canvas Coordinates (No Scaling Offset)
   const getCanvasCoordinates = (e) => {
     const canvas = canvasRef.current;
     if (!canvas) return { x: 0, y: 0 };
 
     const rect = canvas.getBoundingClientRect();
-    const rawX = e.clientX - rect.left;
-    const rawY = e.clientY - rect.top;
-
-    // Apply Inverse Zoom & Pan Transformation to mapped screen touch points
-    const transformedX = (rawX - pan.x) / scale;
-    const transformedY = (rawY - pan.y) / scale;
-
-    const normX = Math.max(0, Math.min(1, transformedX / rect.width));
-    const normY = Math.max(0, Math.min(1, transformedY / rect.height));
+    const normX = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
+    const normY = Math.max(0, Math.min(1, (e.clientY - rect.top) / rect.height));
 
     return { x: normX, y: normY };
   };
 
-  // Pinch Zoom Gesture Handlers
-  const handleTouchStart = (e) => {
-    if (e.touches.length === 2) {
-      isDrawingRef.current = false;
-      const t1 = e.touches[0];
-      const t2 = e.touches[1];
-      const dist = Math.hypot(t2.clientX - t1.clientX, t2.clientY - t1.clientY);
-      pinchStartRef.current = { dist, scale };
-    }
-  };
-
-  const handleTouchMove = (e) => {
-    if (e.touches.length === 2 && pinchStartRef.current) {
-      if (e.cancelable) e.preventDefault();
-      const t1 = e.touches[0];
-      const t2 = e.touches[1];
-      const dist = Math.hypot(t2.clientX - t1.clientX, t2.clientY - t1.clientY);
-      const factor = dist / pinchStartRef.current.dist;
-      const newScale = Math.max(0.5, Math.min(3, pinchStartRef.current.scale * factor));
-      setScale(newScale);
-    }
-  };
-
-  const handleTouchEnd = () => {
-    pinchStartRef.current = null;
-  };
-
-  // Pointer Handlers
+  // Pointer Handlers (Stylus + Touch)
   const handlePointerDown = (e) => {
     if (role !== 'host') return;
     if (e.cancelable) e.preventDefault();
+
+    // Ignore secondary touches if palm rejection is on and Apple Pencil is active
     if (palmRejection && e.pointerType === 'touch') return;
 
     isDrawingRef.current = true;
@@ -418,7 +374,9 @@ export default function App() {
     } catch (err) {}
 
     const { x: normX, y: normY } = getCanvasCoordinates(e);
-    const pressure = e.pointerType === 'pen' && e.pressure > 0 ? e.pressure : 0.5;
+
+    // Guaranteed minimum pressure for stylus / Apple Pencil so light initial touches don't drop
+    const pressure = e.pressure && e.pressure > 0 ? e.pressure : 0.5;
 
     const newPath = {
       id: Date.now(),
@@ -442,8 +400,7 @@ export default function App() {
     if (e.cancelable) e.preventDefault();
 
     const { x: normX, y: normY } = getCanvasCoordinates(e);
-    const pressure = e.pointerType === 'pen' && e.pressure > 0 ? e.pressure : 0.5;
-
+    const pressure = e.pressure && e.pressure > 0 ? e.pressure : 0.5;
     const point = { x: normX, y: normY, pressure };
 
     if (currentPathRef.current) {
@@ -474,7 +431,6 @@ export default function App() {
       if (finishedPath.tool === 'laser') {
         laserPathsRef.current.push({ ...finishedPath, timestamp: Date.now() });
       } else {
-        // Save permanently to active page array
         setPages((prevPages) => {
           const newPages = [...prevPages];
           newPages[currentPage] = [...(newPages[currentPage] || []), finishedPath];
@@ -737,9 +693,6 @@ export default function App() {
         <div className="relative w-full max-w-[1920px] aspect-video bg-slate-950/90 rounded-2xl border border-slate-800/80 shadow-[0_0_50px_rgba(0,0,0,0.8)] overflow-hidden flex items-center justify-center">
           <canvas
             ref={canvasRef}
-            onTouchStart={handleTouchStart}
-            onTouchMove={handleTouchMove}
-            onTouchEnd={handleTouchEnd}
             onPointerDown={handlePointerDown}
             onPointerMove={handlePointerMove}
             onPointerUp={handlePointerUp}
